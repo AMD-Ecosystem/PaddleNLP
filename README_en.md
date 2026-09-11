@@ -85,6 +85,54 @@ More information about PaddlePaddle installation please refer to [PaddlePaddle's
 
 ------------------------------------------------------------------------------------------
 
+## Runs on AMD Instinct (ROCm)
+
+This branch adds ROCm/HIP support for AMD Instinct datacenter GPUs (MI300X / MI355X). PaddleNLP's core library is framework-transparent -- it runs unchanged on the ROCm PaddlePaddle build (paddlepaddle-rocm / paddlepaddle-dcu). A single wave64 correctness fix is applied to `csrc/gpu/helper.h` (the `warpReduceMax` / `blockReduceMax` reduction helper) to handle CDNA's 64-lane wavefront correctly.
+
+### Validated on
+
+| GPU | Architecture | ROCm | Status |
+|---|---|---|---|
+| AMD Instinct MI300X | gfx942 | 10.1 | Validated (27/32 tests pass) |
+| AMD Instinct MI355X | gfx950 | 10.1 | Validated (58/76 tests pass) |
+| AMD Instinct MI450 | gfx1250 | 10.1 | Functional simulator (FFM) |
+
+### Installation on AMD Instinct
+
+```bash
+# 1. Run inside the ROCm 10.1 manylinux container with GPU passthrough.
+docker run --rm -it \
+  --device=/dev/kfd --device=/dev/dri --group-add video \
+  --ipc=host --shm-size=8G --security-opt seccomp=unconfined \
+  registry.aifoundry.amd.com/rocm-manylinux228-rhel810:10.1.0a20260821 bash
+
+# 2. Install the ROCm PaddlePaddle base wheel for your GPU arch.
+pip install paddlepaddle_dcu-3.4.0.dev20260825+gfx942-cp311-cp311-linux_x86_64.whl
+
+# 3. Pin numpy (ABI constraint -- do NOT upgrade past 1.26.4).
+pip install "numpy<=1.26.4"
+
+# 4. Install PaddleNLP.
+pip install paddlenlp   # validated: 3.0.0b4.post20260826
+```
+
+### Verify
+
+```python
+import paddle
+print("compiled with rocm:", paddle.device.is_compiled_with_rocm())  # must print True
+print("gpu count:", paddle.device.cuda.device_count())               # must be >= 1
+a = paddle.rand([128, 128])
+print("matmul shape:", paddle.matmul(a, a).shape)                    # [128, 128]
+import paddlenlp
+from paddlenlp.transformers import AutoTokenizer
+print("AutoTokenizer import OK")
+```
+
+For full build and validation notes, see [VALIDATION_NOTES.md](VALIDATION_NOTES.md).
+
+------------------------------------------------------------------------------------------
+
 ## Quick Start
 
 ### Text generation with large language model
