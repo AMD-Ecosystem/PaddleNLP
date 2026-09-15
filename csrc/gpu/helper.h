@@ -1,5 +1,6 @@
 // Copyright (c) 2023 PaddlePaddle Authors. All Rights Reserved.
-// 
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -261,16 +262,48 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 }
 
 __device__ __forceinline__ float warpReduceMax(float max_value) {
+#ifdef PADDLE_WITH_HIP
+    // warpSize-generic butterfly reduction: correct on wave32 and wave64.
+    // Starts at warpSize/2 so the reduction covers the FULL wavefront
+    // (64 lanes on CDNA), not just a 32-lane half. Uses the non-sync
+    // __shfl_xor (the 32-bit 0xffffffff mask of __shfl_xor_sync trips the
+    // ROCm HIP_ENABLE_WARP_SYNC_BUILTINS sizeof(MaskT)==8 static_assert).
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        max_value = fmaxf(max_value, __shfl_xor(max_value, offset));
+    return max_value;
+#else
     max_value = fmaxf(max_value, __shfl_xor_sync(0xffffffff, max_value, 16));
     max_value = fmaxf(max_value, __shfl_xor_sync(0xffffffff, max_value, 8));
     max_value = fmaxf(max_value, __shfl_xor_sync(0xffffffff, max_value, 4));
     max_value = fmaxf(max_value, __shfl_xor_sync(0xffffffff, max_value, 2));
     max_value = fmaxf(max_value, __shfl_xor_sync(0xffffffff, max_value, 1));
     return max_value;
+#endif
 }
 
 __device__ __forceinline__ float blockReduceMax(float max_value) {
+    // warpLevelMaxs is sized to the max warp COUNT: blockDim.x <= 1024 and the
+    // smallest wavefront is 32 lanes, so at most 32 warps -- [32] is safe on
+    // both wave32 and wave64 (it indexes warps, not lanes).
     static __shared__ float warpLevelMaxs[32];
+#ifdef PADDLE_WITH_HIP
+    // Derive lane/warp indices from the arch warpSize (64 on CDNA) instead of
+    // the hardcoded 32-lane >>5 / &0x1f. nWarps is the true per-block warp
+    // count; the second stage must only gather that many partial maxima.
+    const int laneId = threadIdx.x % warpSize;
+    const int warpId = threadIdx.x / warpSize;
+    const int nWarps = (blockDim.x + warpSize - 1) / warpSize;
+
+    max_value = warpReduceMax(max_value);
+
+    if (laneId == 0) warpLevelMaxs[warpId] = max_value;
+        __syncthreads();
+
+    max_value = (threadIdx.x < nWarps) ? warpLevelMaxs[laneId] : 0;
+    if (warpId == 0) max_value = warpReduceMax(max_value);
+
+    return max_value;
+#else
     const int laneId = threadIdx.x & 0x1f;;
     const int warpId = threadIdx.x >> 5;
 
@@ -283,4 +316,5 @@ __device__ __forceinline__ float blockReduceMax(float max_value) {
     if (warpId == 0) max_value = warpReduceMax(max_value);
 
     return max_value;
+#endif
 }
